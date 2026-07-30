@@ -7,14 +7,23 @@ from bs4 import BeautifulSoup
 
 init(autoreset=True)
 
-def get_favorites(asset_type_id, items_per_page, page_number, user_id, cookie):
-    base_url = "https://www.roblox.com/users/favorites/list-json?assetTypeId=%d&itemsPerPage=%d&pageNumber=%d&userId=%d"
-    url = base_url % (asset_type_id, items_per_page, page_number, user_id)
-
+def get_favorites(user_id, cookie):
+    url = f"https://games.roblox.com/v2/users/{user_id}/favorite/games?limit=100&sortOrder=Desc"
+    all_data = []
+    
     try:
-        response = requests.get(url, cookies={".ROBLOSECURITY": cookie})
-        response.raise_for_status()
-        return response.json()
+        while url:
+            response = requests.get(url, cookies={".ROBLOSECURITY": cookie})
+            response.raise_for_status()
+            data = response.json()
+            all_data.extend(data.get("data", []))
+            
+            cursor = data.get("nextPageCursor")
+            if cursor:
+                url = f"https://games.roblox.com/v2/users/{user_id}/favorite/games?limit=100&sortOrder=Desc&cursor={cursor}"
+            else:
+                break
+        return {"data": all_data}
     except requests.exceptions.RequestException as e:
         print(Fore.RED + f"Failed to fetch favorited games: {e}")
         return None
@@ -29,21 +38,40 @@ def get_xsrf_token(cookie):
         print(Fore.RED + f"Failed to fetch XSRF token: {e}")
         return None
 
-def unfavor_game(cookie, game_id, xsrf_token):
-    url = "https://www.roblox.com/favorite/toggle"
+def get_root_place_id(universe_id, cookie):
+    url = f"https://games.roblox.com/v1/games?universeIds={universe_id}"
+    try:
+        response = requests.get(url, cookies={".ROBLOSECURITY": cookie})
+        response.raise_for_status()
+        data = response.json().get('data', [])
+        if data:
+            return data[0].get('rootPlaceId')
+        return None
+    except requests.exceptions.RequestException as e:
+        print(Fore.RED + f"Failed to fetch root place ID for universe {universe_id}: {e}")
+        return None
+
+def unfavor_game(cookie, user_id, game_id, xsrf_token):
+    url = f"https://catalog.roblox.com/v1/favorites/users/{user_id}/assets/{game_id}/favorite"
     headers = {
-        "Content-Type": "application/json",
         "X-CSRF-TOKEN": xsrf_token,
+        "Content-Type": "application/json; charset=utf-8"
     }
-    payload = {"assetId": game_id}
 
     try:
-        response = requests.post(url, cookies={".ROBLOSECURITY": cookie}, headers=headers, json=payload)
-        response.raise_for_status()
-        return response.status_code
+        response = requests.delete(url, cookies={".ROBLOSECURITY": cookie}, headers=headers)
+        print(f"Unfavorite request for game {game_id} sent. Status code: {response.status_code}")
+        
+        if response.status_code == 403 and "x-csrf-token" in response.headers:
+            return response.status_code, response.headers["x-csrf-token"]
+            
+        if response.status_code not in (200, 403):
+            print(f"Response body: {response.text}")
+            
+        return response.status_code, xsrf_token
     except requests.exceptions.RequestException as e:
         print(Fore.RED + f"Failed to unfavor game: {game_id}. {e}")
-        return None
+        return None, xsrf_token
 
 def main(settings):
     os.system('cls' if os.name == 'nt' else 'clear')
@@ -52,7 +80,7 @@ def main(settings):
     whitelist = set(settings.get("whitelist", []))
     
     try:
-        id = requests.get("https://users.roblox.com/v1/users/authenticated", cookies={".ROBLOSECURITY": cookie}).json()["id"]
+        user_id = requests.get("https://users.roblox.com/v1/users/authenticated", cookies={".ROBLOSECURITY": cookie}).json()["id"]
     except Exception as e:
         print(Fore.RED + "Please provide a valid cookie in settings.json")
         os.system("pause")
@@ -64,13 +92,13 @@ def main(settings):
         os.system("pause")
         return
 
-    favorites = get_favorites(9, 500, 1, id, cookie)
+    favorites = get_favorites(user_id, cookie)
 
-    if favorites is None or 'Data' not in favorites:
+    if favorites is None or 'data' not in favorites:
         os.system("pause")
         return
 
-    games = favorites['Data'].get('Items', [])
+    games = favorites.get('data', [])
     print(Fore.GREEN + f"You currently have {len(games)} favorited games.\n")
 
     if mass_unfavor:
@@ -80,37 +108,60 @@ def main(settings):
 
     unfavorited = 0
     retry_delay = 10
-    total_attempts = 0
 
     for item in games:
-        game_name = item['Item']['Name']
-        game_id = item['Item']['AssetId']
+        total_attempts = 0
+        game_name = item.get('name')
+        universe_id = item.get('id')
+        
+        if not game_name or not universe_id:
+            continue
+        
+        root_place = item.get('rootPlace', {})
+        place_id = root_place.get('id')
 
-        if game_id not in whitelist:
-            unfavor = 'y' if mass_unfavor else input(Fore.LIGHTWHITE_EX + f"Do you want to unfavor game {game_name} (ID: {game_id})? (y/n): ").strip().lower()
+        if universe_id not in whitelist and place_id not in whitelist:
+            if not place_id:
+                place_id = get_root_place_id(universe_id, cookie)
+            
+            if not place_id:
+                print(Fore.YELLOW + f"Could not find place ID for {game_name} (Universe ID: {universe_id}). Skipping.")
+                continue
+
+            unfavor = 'y' if mass_unfavor else input(Fore.LIGHTWHITE_EX + f"Do you want to unfavor game {game_name} (ID: {place_id})? (y/n): ").strip().lower()
 
             if unfavor == 'y':
                 while True:
-                    response_code = unfavor_game(cookie, game_id, xsrf_token)
+                    response_code, new_xsrf_token = unfavor_game(cookie, user_id, place_id, xsrf_token)
                     total_attempts += 1
+                    
+                    if new_xsrf_token and new_xsrf_token != xsrf_token:
+                        xsrf_token = new_xsrf_token
+                        if response_code == 403:
+                            continue
 
                     if response_code == 200:
-                        print(Fore.GREEN + f"Unfavorited game: {game_name} (ID: {game_id})")
+                        print(Fore.GREEN + f"Unfavorited game: {game_name} (ID: {place_id})")
                         unfavorited += 1
-                        retry_delay = max(10, total_attempts * 2) 
+                        time.sleep(1.5)
                         break
+                    elif response_code == 429:
+                        print(Fore.YELLOW + f"Rate limited. Waiting 10 seconds before retrying...")
+                        time.sleep(10)
+                        continue
                     else:
-                        print(Fore.RED + f"Failed to unfavor game: {game_name} (ID: {game_id}).")
+                        print(Fore.RED + f"Failed to unfavor game: {game_name} (ID: {place_id}).")
 
                 
                         time.sleep(retry_delay)
                         
-                        xsrf_token = get_xsrf_token(cookie)
-                        if xsrf_token is None:
+                        new_token = get_xsrf_token(cookie)
+                        if new_token is None:
                             os.system("pause")
                             return
+                        xsrf_token = new_token
         else:
-            print(Fore.YELLOW + f"Skipping game: {game_name} (ID: {game_id})")
+            print(Fore.YELLOW + f"Skipping game: {game_name} (ID: {place_id})")
 
     print(Fore.MAGENTA + f"Unfavorited {unfavorited} games.")
     os.system("pause")
