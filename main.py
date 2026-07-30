@@ -145,12 +145,19 @@ def main(settings):
                         unfavorited += 1
                         time.sleep(1.5)
                         break
+                    elif response_code == 409:
+                        print(Fore.YELLOW + f"Game already unfavorited: {game_name} (ID: {place_id})")
+                        break
                     elif response_code == 429:
                         print(Fore.YELLOW + f"Rate limited. Waiting 10 seconds before retrying...")
                         time.sleep(10)
                         continue
                     else:
                         print(Fore.RED + f"Failed to unfavor game: {game_name} (ID: {place_id}).")
+                        
+                        if total_attempts >= 5:
+                            print(Fore.RED + f"Giving up on {game_name} after 5 attempts.")
+                            break
 
                 
                         time.sleep(retry_delay)
